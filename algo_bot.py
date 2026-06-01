@@ -256,6 +256,11 @@ async def on_member_join(member):
     parent = client.get_channel(ONBOARD_CHANNEL_ID)
     if not parent:
         return
+    # Guard against double-onboarding: if this member already has an active
+    # onboarding thread tracked, don't open another. (Also protects against a
+    # duplicate join event.)
+    if any(s["user_id"] == member.id for s in threads.values()):
+        return
     try:
         thread = await parent.create_thread(
             name=f"welcome-{member.display_name}"[:90],
@@ -379,14 +384,18 @@ async def handle_onboarding(message, state):
         await message.channel.send("one sec, lagged. say that again?")
         return
 
-    m = re.search(r"\[\[NICHE:(\w+)\]\]", reply)
-    if m and role_cache.get(m.group(1)):
-        try:
-            await message.author.add_roles(role_cache[m.group(1)], reason="niche")
-        except discord.Forbidden:
-            print("can't assign role - ALGO must be above the niche roles")
+    # NICHE tag — tolerate ':' or '=' or whitespace (e.g. [[NICHE: Fitness]])
+    m = re.search(r"\[\[\s*NICHE\s*[:=]?\s*(\w+)", reply, re.IGNORECASE)
+    if m:
+        role = role_cache.get(m.group(1).capitalize())
+        if role:
+            try:
+                await message.author.add_roles(role, reason="niche")
+            except discord.Forbidden:
+                print("can't assign role - ALGO must be above the niche roles")
 
-    s = re.search(r"\[\[SAVE:(\{.*?\})\]\]", reply, re.DOTALL)
+    # SAVE tag — grab the JSON object inside, tolerate ':' or '=' before it
+    s = re.search(r"\[\[\s*SAVE\s*[:=]?\s*(\{.*?\})", reply, re.DOTALL | re.IGNORECASE)
     if s:
         try:
             data = json.loads(s.group(1))
@@ -396,11 +405,14 @@ async def handle_onboarding(message, state):
         except Exception as e:
             print("save parse error:", e)
 
-    if "[[DONE]]" in reply:
+    if re.search(r"\[\[\s*DONE", reply, re.IGNORECASE):
         asyncio.create_task(schedule_nudge(message.channel.id))
 
-    clean = re.sub(r"\[\[(NICHE:\w+|SAVE:\{.*?\}|DONE)\]\]", "", reply,
-                   flags=re.DOTALL).strip()
+    # Strip EVERY [[...]] tag, whatever its inner format, so none ever leak to
+    # the user. Greedy-safe: matches the smallest [[ ... ]] spans.
+    clean = re.sub(r"\[\[.*?\]\]", "", reply, flags=re.DOTALL)
+    # Also catch a dangling/unclosed tag the model forgot to close.
+    clean = re.sub(r"\[\[.*$", "", clean, flags=re.DOTALL).strip()
     state["history"].append({"role": "assistant", "content": reply})
     if clean:
         await message.channel.send(clean)
@@ -413,10 +425,12 @@ async def handle_qa(message):
     except Exception as e:
         print("llm error:", e)
         return
-    if "[[ESCALATE]]" in reply:
+    if re.search(r"\[\[\s*ESCALATE", reply, re.IGNORECASE):
         await escalate("couldn't answer from the knowledge base.", message)
-        reply = re.sub(r"\[\[ESCALATE\]\]", "", reply).strip() or \
-            "good q, let me grab someone who knows for sure. one sec."
+    # Strip any [[...]] tags (and a dangling unclosed one) before replying.
+    reply = re.sub(r"\[\[.*?\]\]", "", reply, flags=re.DOTALL)
+    reply = re.sub(r"\[\[.*$", "", reply, flags=re.DOTALL).strip() or \
+        "good q, let me grab someone who knows for sure. one sec."
     await message.reply(reply, mention_author=False)
 
 
