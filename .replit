@@ -1,13 +1,9 @@
-run = "python algo_bot.py"
+run = "python3.12 algo_bot.py"
 entrypoint = "algo_bot.py"
 
 [nix]
 channel = "stable-24_05"
 
 [deployment]
-run = ["python", "algo_bot.py"]
+run = ["python3.12", "algo_bot.py"]
 deploymentTarget = "background"
-
-[[ports]]
-localPort = 8080
-externalPort = 80
