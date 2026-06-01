@@ -1,0 +1,19 @@
+[Unit]
+Description=ALGO Discord bot (Algorithm Arbitrage)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/algo-bot
+# venv created during setup; loads .env from WorkingDirectory via python-dotenv
+ExecStart=/home/ubuntu/algo-bot/venv/bin/python /home/ubuntu/algo-bot/algo_bot.py
+Restart=always
+RestartSec=5
+# Don't spin forever if it's crash-looping on a real bug
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Install]
+WantedBy=multi-user.target
