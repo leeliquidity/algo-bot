@@ -66,8 +66,13 @@ MODEL = os.environ.get("LLM_MODEL", "llama-3.3-70b-versatile")
 
 NICHE_ROLES = ["Health", "Beauty", "Personal", "Fitness", "Business"]
 ENTRY_ROLE = "Copper"
+PROMOTED_ROLE = "Silver"   # role granted on first verified win
 STAFF_ROLES = {"Junior Admin", "Community Manager", "Brand Success"}
 NUDGE_AFTER = 24 * 3600
+
+# #wins channel — set WINS_CHANNEL_ID in .env to enable win-detection. A post
+# there WITH an image attachment promotes the author Copper->Silver.
+WINS_CHANNEL_ID = _int_env("WINS_CHANNEL_ID")
 
 llm = OpenAI(
     api_key=os.environ["GROQ_API_KEY"],
@@ -237,7 +242,7 @@ async def on_ready():
     guild = client.get_guild(GUILD_ID)
     if guild:
         for r in guild.roles:
-            if r.name in NICHE_ROLES or r.name == ENTRY_ROLE:
+            if r.name in NICHE_ROLES or r.name in (ENTRY_ROLE, PROMOTED_ROLE):
                 role_cache[r.name] = r
     if DAILY_POST_ENABLED and not daily_post.is_running():
         daily_post.start()
@@ -338,6 +343,42 @@ async def setup_roles(message):
     await message.channel.send(msg)
 
 
+async def handle_win(message):
+    """A post in #wins WITH an image = sales proof. Promote Copper->Silver,
+    congratulate, log, and ping staff to sanity-check (anti fake-screenshot).
+    Idempotent: skips members who already have Silver."""
+    member = message.author
+    if not isinstance(member, discord.Member):
+        return
+    silver = role_cache.get(PROMOTED_ROLE)
+    if silver is None:
+        print("win: Silver role not found — run !setup-roles or create it")
+        return
+    # already promoted? do nothing (no spam on every future win)
+    if any(r.name == PROMOTED_ROLE for r in member.roles):
+        return
+    try:
+        await member.add_roles(silver, reason="first win posted in #wins")
+    except discord.Forbidden:
+        print("win: can't assign Silver — ALGO must be above Silver in role list")
+        return
+
+    await message.reply(
+        f"🏆 let's gooo {member.mention} first win logged! you're **{PROMOTED_ROLE}** "
+        f"now — inner circle unlocked. keep stacking. 💰",
+        mention_author=False)
+
+    await sb_post("sales", {"discord_id": str(member.id),
+                            "handle": str(member),
+                            "amount": 0, "period": "first-win"})
+    await sb_post("creators", {"discord_id": str(member.id),
+                               "username": str(member), "status": "silver"},
+                  upsert_key="discord_id")
+    # ping staff so a human can verify the screenshot isn't faked
+    await escalate(f"{member} posted a win and was auto-promoted to {PROMOTED_ROLE}. "
+                   f"verify the screenshot is legit.", message)
+
+
 @client.event
 async def on_message(message):
     if message.author.bot:
@@ -357,6 +398,13 @@ async def on_message(message):
     if state and message.author.id == state["user_id"]:
         await handle_onboarding(message, state)
         return
+
+    # 1.5) win posted in #wins (must have an image attachment = sales proof)
+    if WINS_CHANNEL_ID and message.channel.id == WINS_CHANNEL_ID:
+        if any(a.content_type and a.content_type.startswith("image")
+               for a in message.attachments):
+            await handle_win(message)
+        return  # don't run QA/mod on #wins posts
 
     # 2) support channel
     if SUPPORT_CHANNEL_ID and message.channel.id == SUPPORT_CHANNEL_ID \
